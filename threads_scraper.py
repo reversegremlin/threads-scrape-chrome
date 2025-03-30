@@ -839,6 +839,112 @@ class ThreadsScraper:
         except Exception as e_json:
             print(f"Failed to save data as JSON: {str(e_json)}")
 
+    def generate_markdown(self, output_filename: str = "threads_posts.md") -> None:
+        """
+        Generate a Markdown file with the scraped posts and replies.
+
+        Args:
+            output_filename: Path to save the Markdown file
+        """
+        print(f"Generating Markdown: {output_filename}")
+        output_dir = os.path.dirname(os.path.abspath(output_filename))
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Create images directory
+        images_dir = os.path.join(output_dir, "images")
+        os.makedirs(images_dir, exist_ok=True)
+        
+        try:
+            with open(output_filename, 'w', encoding='utf-8') as f:
+                # Write header
+                f.write(f"# Threads Posts and Replies for @{self.username}\n\n")
+                f.write(f"*Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*\n\n")
+                
+                # Write posts
+                if self.posts:
+                    f.write("## Posts\n\n")
+                    for i, post in enumerate(self.posts, 1):
+                        self._write_post_markdown(f, post, i, is_reply=False, images_dir=images_dir)
+                
+                # Write replies
+                if self.replies:
+                    f.write("## Replies\n\n")
+                    for i, reply in enumerate(self.replies, 1):
+                        self._write_post_markdown(f, reply, i, is_reply=True, images_dir=images_dir)
+                
+            print(f"Markdown generated successfully: {output_filename}")
+        except Exception as e:
+            print(f"Error generating Markdown: {str(e)}")
+            self._save_as_json(output_filename)
+    
+    def _write_post_markdown(self, file, post: Dict, index: int, is_reply: bool = False, images_dir: str = None) -> None:
+        """Write a single post or reply to the markdown file."""
+        post_type = "Reply" if is_reply else "Post"
+        
+        # Add header with timestamp
+        file.write(f"### {post_type} #{index}")
+        if post.get('timestamp'):
+            try:
+                dt = datetime.fromisoformat(post['timestamp'].replace('Z', '+00:00'))
+                file.write(f" - {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+            except:
+                file.write(f" - {post['timestamp']}")
+        file.write("\n\n")
+        
+        # Add post text (preserving emojis)
+        if post.get('text'):
+            # Ensure proper Unicode handling for emojis
+            text = post['text'].encode('utf-8').decode('utf-8')
+            file.write(f"{text}\n\n")
+        
+        # Add stats
+        if post.get('stats'):
+            stats_text = " | ".join(post['stats'])
+            file.write(f"*{stats_text}*\n\n")
+        
+        # Add URL
+        if post.get('url'):
+            file.write(f"[View on Threads]({post['url']})\n\n")
+        
+        # Add images (excluding profile pictures)
+        if post.get('images') and images_dir:
+            for i, img_url in enumerate(post['images']):
+                try:
+                    # Download image with proper headers
+                    headers = {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                        'Referer': 'https://www.threads.net/',
+                        'Accept': 'image/webp,image/apng,image/*,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                    }
+                    
+                    response = requests.get(img_url, headers=headers, stream=True, timeout=10)
+                    if response.status_code == 200:
+                        # Generate unique filename
+                        ext = os.path.splitext(img_url)[1] or '.jpg'
+                        img_filename = f"post_{index}_img_{i}{ext}"
+                        img_path = os.path.join(images_dir, img_filename)
+                        
+                        # Save image
+                        with open(img_path, 'wb') as img_file:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                if chunk:
+                                    img_file.write(chunk)
+                        
+                        # Use relative path in markdown
+                        relative_path = os.path.join("images", img_filename)
+                        file.write(f"![Thread Image]({relative_path})\n\n")
+                    else:
+                        print(f"Failed to download image {img_url}: HTTP {response.status_code}")
+                        # Fallback to original URL if download fails
+                        file.write(f"![Thread Image]({img_url})\n\n")
+                except Exception as e:
+                    print(f"Error processing image {img_url}: {str(e)}")
+                    # Fallback to original URL if processing fails
+                    file.write(f"![Thread Image]({img_url})\n\n")
+        
+        file.write("---\n\n")
+
     def close(self):
         """Close the WebDriver."""
         if hasattr(self, 'driver'):
@@ -849,7 +955,12 @@ class ThreadsScraper:
         try:
             self.scrape_posts()
             self.scrape_replies()
-            self.generate_pdf(output_filename)
+            
+            # Determine output format from filename extension
+            if output_filename.endswith('.md'):
+                self.generate_markdown(output_filename)
+            else:
+                self.generate_pdf(output_filename)
         finally:
             self.close()
 
@@ -867,8 +978,8 @@ if __name__ == "__main__":
                         help='Skip scraping replies')
     parser.add_argument('--skip-posts', action='store_true',
                         help='Skip scraping posts')
-    parser.add_argument('--output-format', type=str, choices=['pdf', 'json', 'txt'], default='pdf',
-                        help='Output format: pdf, json, or txt')
+    parser.add_argument('--output-format', type=str, choices=['pdf', 'json', 'txt', 'md'], default='pdf',
+                        help='Output format: pdf, json, txt, or md (markdown)')
     
     args = parser.parse_args()
     
@@ -883,6 +994,8 @@ if __name__ == "__main__":
         extension = '.json'
     elif args.output_format == 'txt':
         extension = '.txt'
+    elif args.output_format == 'md':
+        extension = '.md'
     else:
         extension = '.pdf'
     
@@ -980,6 +1093,9 @@ if __name__ == "__main__":
                         f.write("---\n\n")
             
             print(f"Data saved as text: {output_filename}")
+        elif args.output_format == 'md':
+            # Generate Markdown
+            scraper.generate_markdown(output_filename)
         else:
             # Generate PDF (default)
             scraper.generate_pdf(output_filename)

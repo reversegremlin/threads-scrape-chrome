@@ -233,6 +233,10 @@ class ThreadsScraper:
                     post_data = self._extract_post_data(article)
                     
                     if self._should_save_post(post_data, is_replies):
+                        # If this is a post (not a reply), scrape its replies
+                        if not is_replies and post_data.get('url'):
+                            post_data['replies'] = self.scrape_post_replies(post_data['url'])
+                        
                         self._save_post(post_data, is_replies)
                         posts_count += 1
                         print(f"Extracted {content_type[:-1]} #{posts_count}: "
@@ -399,13 +403,15 @@ class ThreadsScraper:
                 - stats: List of engagement stats
                 - images: List of image URLs
                 - url: Post URL
+                - replies: List of replies to the post
         """
         post_data = {
             'text': self._extract_text(article),
             'timestamp': self._extract_timestamp(article),
             'stats': self._extract_stats(article),
             'images': self._extract_images(article),
-            'url': self._extract_url(article)
+            'url': self._extract_url(article),
+            'replies': []  # Will be populated when scraping replies
         }
         return post_data
 
@@ -897,7 +903,7 @@ class ThreadsScraper:
             text = post['text'].encode('utf-8').decode('utf-8')
             file.write(f"{text}\n\n")
         
-        # Add stats
+        # Add stats with engagement metrics
         if post.get('stats'):
             stats_text = " | ".join(post['stats'])
             file.write(f"*{stats_text}*\n\n")
@@ -943,7 +949,54 @@ class ThreadsScraper:
                     # Fallback to original URL if processing fails
                     file.write(f"![Thread Image]({img_url})\n\n")
         
+        # Add replies section if this is a post and has replies
+        if not is_reply and post.get('replies'):
+            file.write("#### Replies\n\n")
+            for i, reply in enumerate(post['replies'], 1):
+                file.write(f"##### Reply #{i}\n\n")
+                if reply.get('text'):
+                    file.write(f"{reply['text']}\n\n")
+                if reply.get('stats'):
+                    stats_text = " | ".join(reply['stats'])
+                    file.write(f"*{stats_text}*\n\n")
+                if reply.get('url'):
+                    file.write(f"[View Reply]({reply['url']})\n\n")
+                file.write("---\n\n")
+        
         file.write("---\n\n")
+
+    def scrape_post_replies(self, post_url: str) -> List[Dict]:
+        """
+        Scrape replies for a specific post.
+
+        Args:
+            post_url: URL of the post to scrape replies for
+
+        Returns:
+            List[Dict]: List of reply data
+        """
+        print(f"Scraping replies for post: {post_url}")
+        self.driver.get(post_url)
+        time.sleep(3)  # Wait for page to load
+        
+        replies = []
+        try:
+            # Find reply elements
+            reply_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[role='article']")
+            
+            for reply in reply_elements:
+                try:
+                    reply_data = self._extract_post_data(reply)
+                    if reply_data['text'] or reply_data['images']:
+                        replies.append(reply_data)
+                except Exception as e:
+                    print(f"Error extracting reply: {str(e)}")
+                    continue
+            
+        except Exception as e:
+            print(f"Error scraping replies: {str(e)}")
+        
+        return replies
 
     def close(self):
         """Close the WebDriver."""

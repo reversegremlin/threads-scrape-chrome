@@ -216,9 +216,6 @@ class ThreadsScraper:
         content_type = "replies" if is_replies else "posts"
         print(f"Loading {content_type} page...")
         
-        # Save debug information
-        self._save_debug_info(is_replies)
-        
         last_height = self.driver.execute_script("return document.body.scrollHeight")
         posts_count = 0
         scroll_attempts = 0
@@ -235,6 +232,7 @@ class ThreadsScraper:
                     if self._should_save_post(post_data, is_replies):
                         # If this is a post (not a reply), scrape its replies
                         if not is_replies and post_data.get('url'):
+                            print(f"\nScraping replies for post #{posts_count + 1}")
                             post_data['replies'] = self.scrape_post_replies(post_data['url'])
                         
                         self._save_post(post_data, is_replies)
@@ -384,10 +382,8 @@ class ThreadsScraper:
         print("3. The page structure might have changed")
         print("4. There might be anti-scraping measures in place")
         
-        # Save final screenshot for debugging
-        final_screenshot = f"final_{is_replies}_page.png"
-        self.driver.save_screenshot(final_screenshot)
-        print(f"Saved final state screenshot to {final_screenshot}")
+        # No longer saving debug files as they're not needed
+        print("Please check the account settings and try again.")
     
     def _extract_post_data(self, article) -> Dict[str, Union[str, List[str]]]:
         """
@@ -952,18 +948,78 @@ class ThreadsScraper:
         # Add replies section if this is a post and has replies
         if not is_reply and post.get('replies'):
             file.write("#### Replies\n\n")
-            for i, reply in enumerate(post['replies'], 1):
-                file.write(f"##### Reply #{i}\n\n")
-                if reply.get('text'):
-                    file.write(f"{reply['text']}\n\n")
-                if reply.get('stats'):
-                    stats_text = " | ".join(reply['stats'])
-                    file.write(f"*{stats_text}*\n\n")
-                if reply.get('url'):
-                    file.write(f"[View Reply]({reply['url']})\n\n")
+            file.write(f"*Found {len(post['replies'])} replies*\n\n")
+            
+            # Group replies by date (within 5 minutes of each other)
+            grouped_replies = self._group_replies_by_time(post['replies'])
+            
+            for group in grouped_replies:
+                if len(group) > 1:
+                    # Multiple replies in the same time window
+                    file.write("##### Multiple Replies\n\n")
+                    for reply in group:
+                        self._write_reply_details(file, reply)
+                    file.write("\n")
+                else:
+                    # Single reply
+                    self._write_reply_details(file, group[0])
+                    file.write("\n")
+                
                 file.write("---\n\n")
         
         file.write("---\n\n")
+
+    def _group_replies_by_time(self, replies: List[Dict], time_window: int = 300) -> List[List[Dict]]:
+        """
+        Group replies that were posted within a time window of each other.
+
+        Args:
+            replies: List of reply dictionaries
+            time_window: Time window in seconds (default 5 minutes)
+
+        Returns:
+            List[List[Dict]]: Grouped replies
+        """
+        if not replies:
+            return []
+        
+        # Sort replies by timestamp
+        sorted_replies = sorted(replies, key=lambda x: x.get('timestamp', ''))
+        
+        groups = []
+        current_group = [sorted_replies[0]]
+        
+        for reply in sorted_replies[1:]:
+            try:
+                current_time = datetime.fromisoformat(reply['timestamp'].replace('Z', '+00:00'))
+                last_time = datetime.fromisoformat(current_group[-1]['timestamp'].replace('Z', '+00:00'))
+                
+                time_diff = (current_time - last_time).total_seconds()
+                
+                if time_diff <= time_window:
+                    current_group.append(reply)
+                else:
+                    groups.append(current_group)
+                    current_group = [reply]
+            except:
+                # If timestamp parsing fails, start a new group
+                groups.append(current_group)
+                current_group = [reply]
+        
+        groups.append(current_group)
+        return groups
+
+    def _write_reply_details(self, file, reply: Dict) -> None:
+        """Write details of a single reply to the markdown file."""
+        if reply.get('text'):
+            file.write(f"{reply['text']}\n\n")
+        
+        if reply.get('stats'):
+            stats_text = " | ".join(reply['stats'])
+            file.write(f"*{stats_text}*\n\n")
+        
+        if reply.get('url'):
+            file.write(f"[View Reply]({reply['url']})\n\n")
 
     def scrape_post_replies(self, post_url: str) -> List[Dict]:
         """
@@ -977,26 +1033,149 @@ class ThreadsScraper:
         """
         print(f"Scraping replies for post: {post_url}")
         self.driver.get(post_url)
-        time.sleep(3)  # Wait for page to load
+        time.sleep(5)  # Increased initial wait time
         
         replies = []
+        last_height = self.driver.execute_script("return document.body.scrollHeight")
+        scroll_attempts = 0
+        max_scroll_attempts = 50  # Increased to get more replies
+        no_new_replies_count = 0
+        
         try:
-            # Find reply elements
-            reply_elements = self.driver.find_elements(By.CSS_SELECTOR, "article[role='article']")
-            
-            for reply in reply_elements:
-                try:
-                    reply_data = self._extract_post_data(reply)
-                    if reply_data['text'] or reply_data['images']:
-                        replies.append(reply_data)
-                except Exception as e:
-                    print(f"Error extracting reply: {str(e)}")
+            while scroll_attempts < max_scroll_attempts:
+                # Find reply elements using multiple selectors
+                selectors = [
+                    "div[role='article']",
+                    "article",
+                    "div[data-pressable-container='true']",
+                    "div._aabd._aa8k._al3l",
+                    "div[style*='flex-direction: column']",
+                    "div[class*='reply']",
+                    "div[class*='comment']"
+                ]
+                
+                reply_elements = []
+                for selector in selectors:
+                    elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                    if elements:
+                        reply_elements = elements
+                        print(f"Found {len(elements)} potential replies with selector: {selector}")
+                        break
+                
+                if not reply_elements:
+                    print("No reply elements found, trying to scroll to load more")
+                    self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(2)
                     continue
+                
+                previous_replies_count = len(replies)
+                
+                for reply in reply_elements:
+                    try:
+                        # Skip the original post
+                        if self._is_original_post(reply):
+                            continue
+                        
+                        # Scroll reply into view
+                        self.driver.execute_script("arguments[0].scrollIntoView(true);", reply)
+                        time.sleep(0.5)  # Wait for lazy loading
+                        
+                        reply_data = self._extract_post_data(reply)
+                        if reply_data['text'] or reply_data['images']:
+                            # Check for duplicates
+                            is_duplicate = False
+                            for existing_reply in replies:
+                                if (existing_reply.get('text') == reply_data.get('text') and
+                                    existing_reply.get('timestamp') == reply_data.get('timestamp')):
+                                    is_duplicate = True
+                                    break
+                            
+                            if not is_duplicate:
+                                replies.append(reply_data)
+                                print(f"Found reply: {reply_data.get('text', '')[:100]}...")
+                    except Exception as e:
+                        print(f"Error extracting reply: {str(e)}")
+                        continue
+                
+                # Check if we found any new replies
+                if len(replies) == previous_replies_count:
+                    no_new_replies_count += 1
+                    if no_new_replies_count >= 3:  # If no new replies after 3 attempts, stop
+                        print("No new replies found after multiple attempts, stopping")
+                        break
+                else:
+                    no_new_replies_count = 0
+                
+                # Scroll to load more replies
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(2)
+                
+                # Try to trigger lazy loading
+                self.driver.execute_script("""
+                    window.scrollTo(0, document.body.scrollHeight);
+                    setTimeout(() => window.scrollTo(0, document.body.scrollHeight + 100), 500);
+                """)
+                time.sleep(2)
+                
+                new_height = self.driver.execute_script("return document.body.scrollHeight")
+                if new_height == last_height:
+                    # Try one more scroll with JavaScript
+                    self.driver.execute_script("""
+                        window.scrollTo(0, document.body.scrollHeight);
+                        setTimeout(() => window.scrollTo(0, document.body.scrollHeight + 100), 500);
+                    """)
+                    time.sleep(2)
+                    new_height = self.driver.execute_script("return document.body.scrollHeight")
+                    if new_height == last_height:
+                        print("Reached the bottom of replies")
+                        break
+                
+                last_height = new_height
+                scroll_attempts += 1
+                print(f"Scrolled {scroll_attempts} times, found {len(replies)} replies so far")
             
         except Exception as e:
             print(f"Error scraping replies: {str(e)}")
         
+        print(f"Finished scraping {len(replies)} replies for post: {post_url}")
         return replies
+
+    def _is_original_post(self, element) -> bool:
+        """
+        Check if an element is the original post rather than a reply.
+
+        Args:
+            element: The element to check
+
+        Returns:
+            bool: True if the element is the original post
+        """
+        try:
+            # Look for indicators that this is the original post
+            indicators = [
+                "Pinned",  # Pinned post indicator
+                "Verified",  # Verified badge
+                "Follow",  # Follow button
+                "Share",  # Share button
+                "More"  # More options button
+            ]
+            
+            # Check element text and attributes
+            element_text = element.text.lower()
+            for indicator in indicators:
+                if indicator.lower() in element_text:
+                    return True
+            
+            # Check for specific classes or attributes that indicate original post
+            if element.get_attribute("data-pressable-container") == "true":
+                # Look for specific elements that are only present in original posts
+                if element.find_elements(By.CSS_SELECTOR, "div[role='button']"):
+                    return True
+            
+            return False
+        except Exception as e:
+            print(f"Error checking if element is original post: {str(e)}")
+            return False
 
     def close(self):
         """Close the WebDriver."""

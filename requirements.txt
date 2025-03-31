@@ -2,3 +2,4 @@ selenium==4.15.2
 requests==2.31.0
 reportlab==4.0.7
 Pillow==10.1.0 
+tenacity==9.0.0
